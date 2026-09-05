@@ -1,7 +1,7 @@
 {
   "name": "llm-ledger",
-  "version": "0.1.0",
-  "description": "Local-first FinOps ledger for AI contractors — import provider usage CSVs into SQLite and query spend via MCP tools.",
+  "version": "0.2.0",
+  "description": "Local-first FinOps ledger for AI contractors — import provider usage CSVs or sync OpenRouter activity into SQLite and query spend via MCP tools.",
   "type": "module",
   "bin": {
     "llm-ledger": "./dist/index.js"
