@@ -1,7 +1,7 @@
 {
   "name": "llm-ledger",
-  "version": "0.2.0",
-  "description": "Local-first FinOps ledger for AI contractors — import provider usage CSVs or sync OpenRouter activity into SQLite and query spend via MCP tools.",
+  "version": "0.3.0",
+  "description": "Local-first FinOps ledger for AI contractors — import provider usage CSVs or sync OpenRouter activity / OpenAI org costs into SQLite and query spend via MCP tools.",
   "type": "module",
   "bin": {
     "llm-ledger": "./dist/index.js"
@@ -45,5 +45,14 @@
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
-  }
+  },
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zacsladden1/llm-ledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Zacsladden1/llm-ledger/issues"
+  },
+  "homepage": "https://github.com/Zacsladden1/llm-ledger#readme"
 }
