@@ -1,0 +1,49 @@
+{
+  "name": "llm-ledger",
+  "version": "0.1.0",
+  "description": "Local-first FinOps ledger for AI contractors — import provider usage CSVs into SQLite and query spend via MCP tools.",
+  "type": "module",
+  "bin": {
+    "llm-ledger": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "finops",
+    "llm",
+    "openai",
+    "anthropic",
+    "openrouter",
+    "sqlite",
+    "cost-tracking"
+  ],
+  "author": "Zacsladden1",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.9.1",
+    "csv-parse": "^5.6.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}
