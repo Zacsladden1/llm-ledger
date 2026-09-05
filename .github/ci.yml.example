@@ -1,5 +1,6 @@
 name: CI
 
+# Copy this file to .github/workflows/ci.yml (requires a PAT with the `workflow` scope).
 on:
   push:
     branches: [main]
@@ -20,7 +21,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - name: Install
-        run: npm ci
+        run: npm install
       - name: Build
         run: npm run build
       - name: Test
