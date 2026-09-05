@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import {
   insertImport,
   insertUsageBatch,
+  insertUsageBatchIdempotent,
   listImports,
   setBudget,
   getBudget,
@@ -17,6 +18,11 @@ import {
 } from "../importers/parse.js";
 import type { Provider } from "../importers/types.js";
 import { monthBounds, parseYearMonth } from "../dates.js";
+import {
+  fetchOpenRouterActivity,
+  mapActivityItems,
+  resolveManagementKey,
+} from "../openrouter/activity.js";
 
 const PROVIDERS: Provider[] = ["openai", "anthropic", "openrouter"];
 
@@ -86,6 +92,7 @@ export function handleImportCsv(
       cost_usd: r.cost_usd,
       raw_cost_present: r.raw_cost_present ? 1 : 0,
       import_id: importId,
+      dedupe_key: null,
     }))
   );
 
@@ -103,6 +110,110 @@ export function handleImportCsv(
     priced_from_csv: pricedFromCsv,
     priced_from_fallback: pricedFromFallback,
     expected_columns: EXPECTED_COLUMNS[provider],
+  };
+}
+
+export type SyncOpenRouterArgs = {
+  /** Optional override; prefer env OPENROUTER_MANAGEMENT_KEY. Never echoed. */
+  api_key?: string;
+  project?: string;
+  /** Client-side inclusive lower bound YYYY-MM-DD. */
+  since?: string;
+  /** Client-side inclusive upper bound YYYY-MM-DD. */
+  until?: string;
+  /** Pass-through single-day filter to OpenRouter activity API. */
+  date?: string;
+  workspace_id?: string;
+  group_by_workspace?: boolean;
+  /** Injectable fetch for tests. */
+  fetchImpl?: typeof fetch;
+};
+
+export async function handleSyncOpenrouter(
+  db: Database.Database,
+  args: SyncOpenRouterArgs = {}
+): Promise<object> {
+  // Resolve key without ever putting it into the return payload.
+  const apiKey = resolveManagementKey(args.api_key);
+
+  if (args.since && !/^\d{4}-\d{2}-\d{2}$/.test(args.since)) {
+    throw new Error(`Invalid since "${args.since}"; expected YYYY-MM-DD`);
+  }
+  if (args.until && !/^\d{4}-\d{2}-\d{2}$/.test(args.until)) {
+    throw new Error(`Invalid until "${args.until}"; expected YYYY-MM-DD`);
+  }
+  if (args.date && !/^\d{4}-\d{2}-\d{2}$/.test(args.date)) {
+    throw new Error(`Invalid date "${args.date}"; expected YYYY-MM-DD`);
+  }
+
+  const items = await fetchOpenRouterActivity({
+    apiKey,
+    date: args.date,
+    workspaceId: args.workspace_id,
+    groupByWorkspace: args.group_by_workspace,
+    fetchImpl: args.fetchImpl,
+  });
+
+  const projectOverride = args.project?.trim() || null;
+  const mapped = mapActivityItems(items, {
+    project: projectOverride,
+    since: args.since,
+    until: args.until,
+  });
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const rangeLabel =
+    args.date ||
+    [args.since || "30d", args.until || "now"].join("..");
+  const filename = `openrouter-activity:${rangeLabel}@${stamp}`;
+
+  const importId = insertImport(
+    db,
+    "openrouter",
+    filename,
+    projectOverride,
+    mapped.length
+  );
+
+  const { inserted, skipped } = insertUsageBatchIdempotent(
+    db,
+    mapped.map((r) => ({
+      provider: r.provider,
+      model: r.model,
+      project: r.project,
+      usage_date: r.usage_date,
+      input_tokens: r.input_tokens,
+      output_tokens: r.output_tokens,
+      total_tokens: r.total_tokens,
+      cost_usd: r.cost_usd,
+      raw_cost_present: r.raw_cost_present ? 1 : 0,
+      import_id: importId,
+      dedupe_key: r.dedupe_key,
+    }))
+  );
+
+  // Update import row_count to reflect newly inserted rows.
+  db.prepare(`UPDATE imports SET row_count = ? WHERE id = ?`).run(
+    inserted,
+    importId
+  );
+
+  const activityCost = mapped.reduce((s, r) => s + r.cost_usd, 0);
+
+  return {
+    ok: true,
+    import_id: importId,
+    provider: "openrouter",
+    source: "activity",
+    filename,
+    fetched: items.length,
+    mapped: mapped.length,
+    imported: inserted,
+    skipped_duplicates: skipped,
+    activity_cost_usd: roundMoney(activityCost),
+    // Explicitly do not include api_key or Authorization material.
+    note:
+      "Idempotent on day+model+endpoint(+workspace). Re-running skips duplicates.",
   };
 }
 
@@ -202,8 +313,7 @@ export function handleCheckBudget(
   const limit = budget?.monthly_limit_usd ?? null;
   const remaining =
     limit === null ? null : roundMoney(limit - spent.cost_usd);
-  const over =
-    limit === null ? false : spent.cost_usd > limit;
+  const over = limit === null ? false : spent.cost_usd > limit;
   return {
     project,
     period_start: start,
