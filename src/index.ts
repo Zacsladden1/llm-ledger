@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * llm-ledger — local-first FinOps MCP server (stdio).
- * Not an LLM gateway: imports provider usage CSVs / OpenRouter activity into SQLite
- * and exposes spend tools.
+ * Not an LLM gateway: imports provider usage CSVs / syncs OpenRouter activity &
+ * OpenAI org costs into SQLite and exposes spend tools.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -11,6 +11,7 @@ import { defaultDbPath, openDb } from "./db.js";
 import {
   handleImportCsv,
   handleSyncOpenrouter,
+  handleSyncOpenai,
   handleSpendThisMonth,
   handleSpendByProject,
   handleInvoiceSummary,
@@ -24,7 +25,7 @@ const db = openDb(dbPath);
 
 const server = new McpServer({
   name: "llm-ledger",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 function jsonResult(data: unknown) {
@@ -128,6 +129,51 @@ server.tool(
 );
 
 server.tool(
+  "sync_openai",
+  "Sync OpenAI org spend from GET /v1/organization/costs into the ledger (last ~30 days). Requires an Admin API key via env OPENAI_ADMIN_KEY (preferred) or optional api_key arg (never logged). Regular sk- keys will not work. Idempotent on day+line_item(+project). Costs-only (token counts are 0).",
+  {
+    api_key: z
+      .string()
+      .optional()
+      .describe(
+        "Optional Admin API key override. Prefer OPENAI_ADMIN_KEY env. Never echoed in results."
+      ),
+    project: z
+      .string()
+      .optional()
+      .describe("Optional project tag applied to all synced rows"),
+    since: z
+      .string()
+      .optional()
+      .describe("Inclusive lower bound YYYY-MM-DD (client-side filter)"),
+    until: z
+      .string()
+      .optional()
+      .describe("Inclusive upper bound YYYY-MM-DD (client-side filter)"),
+    start_time: z
+      .number()
+      .optional()
+      .describe("Unix seconds inclusive start for Costs API (default ~30 days ago)"),
+    end_time: z
+      .number()
+      .optional()
+      .describe("Unix seconds exclusive end for Costs API"),
+    limit: z
+      .number()
+      .optional()
+      .describe("Number of daily buckets to return (1–180; default 30)"),
+  },
+  async (args) => {
+    try {
+      // api_key is used only for Authorization; response never includes it.
+      return jsonResult(await handleSyncOpenai(db, args));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.tool(
   "spend_this_month",
   "Total spend for the current calendar month (or a given YYYY-MM). Optionally filter by project.",
   {
@@ -211,7 +257,7 @@ server.tool(
 
 server.tool(
   "list_imports",
-  "List CSV / OpenRouter sync import batches recorded in the ledger.",
+  "List CSV / OpenRouter / OpenAI sync import batches recorded in the ledger.",
   {},
   async () => {
     try {
