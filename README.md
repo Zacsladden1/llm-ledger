@@ -2,9 +2,9 @@
 
 **Local-first FinOps ledger for AI contractors.**
 
-Import provider usage CSVs (OpenAI, Anthropic, OpenRouter) — or sync OpenRouter spend via the Activity API — into a local SQLite database and query spend, budgets, and invoice-style summaries through MCP tools — from Cursor, Claude Desktop, or any MCP client.
+Import provider usage CSVs (OpenAI, Anthropic, OpenRouter) — or sync OpenRouter Activity / OpenAI Organization Costs into a local SQLite database — and query spend, budgets, and invoice-style summaries through MCP tools — from Cursor, Claude Desktop, or any MCP client.
 
-This is **not** an LLM gateway. It does not proxy prompts. OpenRouter sync needs a **Management API key** (not an inference key); that key is only used to pull activity and is never stored in the ledger.
+This is **not** an LLM gateway. It does not proxy prompts. OpenRouter sync needs a **Management API key**; OpenAI costs sync needs an **Admin API key** (regular `sk-` keys will not work). Keys are only used at sync time and are never stored in the ledger.
 
 ## Why
 
@@ -34,12 +34,13 @@ Requires **Node.js 20+**. Native module `better-sqlite3` needs build tools on so
 |------|---------|
 | `import_csv` | Import a usage CSV (`openai` / `anthropic` / `openrouter`) |
 | `sync_openrouter` | Pull OpenRouter Activity API spend (Management key) into the ledger |
+| `sync_openai` | Pull OpenAI Organization Costs API spend (Admin key) into the ledger |
 | `spend_this_month` | Total spend for current month (or `YYYY-MM`) |
 | `spend_by_project` | Spend breakdown by project |
 | `invoice_summary` | Lines by provider + model (+ project) |
 | `set_budget` | Set monthly USD budget for a project |
 | `check_budget` | Compare MTD spend vs budget |
-| `list_imports` | List CSV / API sync import batches |
+| `list_imports` | List CSV / OpenRouter / OpenAI sync import batches |
 
 ### CSV columns (resilient aliases)
 
@@ -85,6 +86,35 @@ Example Cursor `env` block:
 
 Sync is **idempotent**: rows are keyed by day + model + endpoint (+ workspace when present), so re-running skips duplicates and records an import batch visible via `list_imports`. The Activity API covers roughly the last 30 completed UTC days.
 
+
+## OpenAI Costs sync (`sync_openai`)
+
+OpenAI's `/v1/organization/costs` endpoint requires an **Organization Admin API key**. Regular project `sk-` inference keys **will not work**.
+
+1. Create an Admin key at [platform.openai.com/settings/organization/admin-keys](https://platform.openai.com/settings/organization/admin-keys).
+2. Set env `OPENAI_ADMIN_KEY` in your MCP server config (preferred), **or** pass `api_key` to the tool once (never logged or echoed in tool results).
+3. Ask your MCP client, e.g. *"Sync OpenAI last 30 days"* / call `sync_openai` with optional `since` / `until` (`YYYY-MM-DD`), `start_time` (unix), `limit` (1–180), or `project`.
+
+Example Cursor `env` block (combined with OpenRouter):
+
+```json
+{
+  "mcpServers": {
+    "llm-ledger": {
+      "command": "node",
+      "args": ["/absolute/path/to/llm-ledger/dist/index.js"],
+      "env": {
+        "LLM_LEDGER_DB": "/absolute/path/to/optional-custom.db",
+        "OPENROUTER_MANAGEMENT_KEY": "sk-or-…",
+        "OPENAI_ADMIN_KEY": "sk-admin-…"
+      }
+    }
+  }
+}
+```
+
+Sync is **idempotent**: rows are keyed as `oai:costs:{date}:{line_item|project|bucket}` (day + line item + project when present). v0.3 is **costs-only** (token columns are 0). Import batches appear in `list_imports`.
+
 ## Cursor config
 
 Add to your MCP settings (e.g. Cursor **Settings → MCP**):
@@ -103,7 +133,7 @@ Add to your MCP settings (e.g. Cursor **Settings → MCP**):
 }
 ```
 
-After `npm run build`, you can also use the bin:
+### npx (once on the public registry)
 
 ```json
 {
@@ -116,7 +146,7 @@ After `npm run build`, you can also use the bin:
 }
 ```
 
-(when published), or point `command` at `./dist/index.js` via `node`.
+Or after a local build, point command at node with args to dist/index.js. See PUBLISH.md for registry release steps.
 
 ## Claude Desktop config
 
