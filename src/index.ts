@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * llm-ledger — local-first FinOps MCP server (stdio).
- * Not an LLM gateway: imports provider usage CSVs into SQLite and exposes spend tools.
+ * Not an LLM gateway: imports provider usage CSVs / OpenRouter activity into SQLite
+ * and exposes spend tools.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -9,6 +10,7 @@ import { z } from "zod";
 import { defaultDbPath, openDb } from "./db.js";
 import {
   handleImportCsv,
+  handleSyncOpenrouter,
   handleSpendThisMonth,
   handleSpendByProject,
   handleInvoiceSummary,
@@ -22,7 +24,7 @@ const db = openDb(dbPath);
 
 const server = new McpServer({
   name: "llm-ledger",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 function jsonResult(data: unknown) {
@@ -74,6 +76,51 @@ server.tool(
           project: args.project,
         })
       );
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.tool(
+  "sync_openrouter",
+  "Sync OpenRouter spend from GET /api/v1/activity into the ledger (last ~30 UTC days). Requires a Management API key via env OPENROUTER_MANAGEMENT_KEY or optional api_key arg (never logged). Inference keys return 401/403. Idempotent on day+model+endpoint.",
+  {
+    api_key: z
+      .string()
+      .optional()
+      .describe(
+        "Optional Management API key override. Prefer OPENROUTER_MANAGEMENT_KEY env. Never echoed in results."
+      ),
+    project: z
+      .string()
+      .optional()
+      .describe("Optional project tag applied to all synced rows"),
+    since: z
+      .string()
+      .optional()
+      .describe("Inclusive lower bound YYYY-MM-DD (client-side filter)"),
+    until: z
+      .string()
+      .optional()
+      .describe("Inclusive upper bound YYYY-MM-DD (client-side filter)"),
+    date: z
+      .string()
+      .optional()
+      .describe("Single UTC date YYYY-MM-DD passed to the activity API"),
+    workspace_id: z
+      .string()
+      .optional()
+      .describe("Filter activity to a workspace UUID"),
+    group_by_workspace: z
+      .boolean()
+      .optional()
+      .describe("Split rows per workspace (adds workspace_id to each item)"),
+  },
+  async (args) => {
+    try {
+      // api_key is used only for Authorization; response never includes it.
+      return jsonResult(await handleSyncOpenrouter(db, args));
     } catch (err) {
       return errorResult(err);
     }
@@ -164,7 +211,7 @@ server.tool(
 
 server.tool(
   "list_imports",
-  "List CSV import batches recorded in the ledger.",
+  "List CSV / OpenRouter sync import batches recorded in the ledger.",
   {},
   async () => {
     try {
