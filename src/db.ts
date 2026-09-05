@@ -15,6 +15,7 @@ export type UsageRow = {
   cost_usd: number;
   raw_cost_present: number;
   import_id: number;
+  dedupe_key?: string | null;
   created_at?: string;
 };
 
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS usage (
   cost_usd REAL NOT NULL DEFAULT 0,
   raw_cost_present INTEGER NOT NULL DEFAULT 0,
   import_id INTEGER NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
+  dedupe_key TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -62,6 +64,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_date ON usage(usage_date);
 CREATE INDEX IF NOT EXISTS idx_usage_project ON usage(project);
 CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage(provider);
 CREATE INDEX IF NOT EXISTS idx_usage_import ON usage(import_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedupe
+  ON usage(dedupe_key) WHERE dedupe_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS budgets (
   project TEXT PRIMARY KEY,
@@ -69,6 +73,20 @@ CREATE TABLE IF NOT EXISTS budgets (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `;
+
+function migrate(db: Database.Database): void {
+  const cols = db
+    .prepare(`PRAGMA table_info(usage)`)
+    .all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("dedupe_key")) {
+    db.exec(`ALTER TABLE usage ADD COLUMN dedupe_key TEXT`);
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_dedupe
+      ON usage(dedupe_key) WHERE dedupe_key IS NOT NULL
+  `);
+}
 
 export function defaultDbPath(): string {
   const override = process.env.LLM_LEDGER_DB;
@@ -83,6 +101,7 @@ export function openDb(dbPath = defaultDbPath()): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -110,17 +129,57 @@ export function insertUsageBatch(
     `INSERT INTO usage (
       provider, model, project, usage_date,
       input_tokens, output_tokens, total_tokens,
-      cost_usd, raw_cost_present, import_id
+      cost_usd, raw_cost_present, import_id, dedupe_key
     ) VALUES (
       @provider, @model, @project, @usage_date,
       @input_tokens, @output_tokens, @total_tokens,
-      @cost_usd, @raw_cost_present, @import_id
+      @cost_usd, @raw_cost_present, @import_id, @dedupe_key
     )`
   );
   const tx = db.transaction((batch: typeof rows) => {
-    for (const row of batch) stmt.run(row);
+    for (const row of batch) {
+      stmt.run({
+        ...row,
+        dedupe_key: row.dedupe_key ?? null,
+      });
+    }
   });
   tx(rows);
+}
+
+/**
+ * Insert usage rows, skipping any whose dedupe_key already exists.
+ * Returns counts of inserted vs skipped.
+ */
+export function insertUsageBatchIdempotent(
+  db: Database.Database,
+  rows: Omit<UsageRow, "id" | "created_at">[]
+): { inserted: number; skipped: number } {
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO usage (
+      provider, model, project, usage_date,
+      input_tokens, output_tokens, total_tokens,
+      cost_usd, raw_cost_present, import_id, dedupe_key
+    ) VALUES (
+      @provider, @model, @project, @usage_date,
+      @input_tokens, @output_tokens, @total_tokens,
+      @cost_usd, @raw_cost_present, @import_id, @dedupe_key
+    )`
+  );
+  let inserted = 0;
+  let skipped = 0;
+  const tx = db.transaction((batch: typeof rows) => {
+    for (const row of batch) {
+      const info = stmt.run({
+        ...row,
+        dedupe_key: row.dedupe_key ?? null,
+      });
+      if (info.changes > 0) inserted += 1;
+      else skipped += 1;
+    }
+  });
+  tx(rows);
+  return { inserted, skipped };
 }
 
 export function listImports(db: Database.Database): ImportRow[] {
