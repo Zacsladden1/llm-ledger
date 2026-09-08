@@ -1,21 +1,54 @@
 # llm-ledger
 
-**Local-first FinOps ledger for AI contractors.**
+**Local-first FinOps ledger for AI spend — queryable by agents via MCP.**
 
-Import provider usage CSVs (OpenAI, Anthropic, OpenRouter) — or sync OpenRouter Activity / OpenAI Organization Costs into a local SQLite database — and query spend, budgets, and invoice-style summaries through MCP tools — from Cursor, Claude Desktop, or any MCP client.
+LLM usage is scattered across provider dashboards and CSVs. Those surfaces don’t compose into agent workflows, so answering “what did project X cost this month?” still means manual export and spreadsheet glue.
 
-This is **not** an LLM gateway. It does not proxy prompts. OpenRouter sync needs a **Management API key**; OpenAI costs sync needs an **Admin API key** (regular `sk-` keys will not work). Keys are only used at sync time and are never stored in the ledger.
+`llm-ledger` ingests provider usage (CSV, OpenRouter Activity, OpenAI Organization Costs) into a local SQLite database and exposes budget, invoice, and spend tools over the [Model Context Protocol](https://modelcontextprotocol.io/). It is **not** an LLM gateway: it does not proxy prompts.
 
-## Why
+Designed and shipped as an independent TypeScript MCP server for contractors and small teams who need spend visibility without sending ledger data to a third-party SaaS.
 
-Freelancers and small agencies juggling multiple AI providers need a single place to answer:
+## Architecture
 
-- How much did I spend this month?
-- Which client/project ate the budget?
-- Am I over the retainer ceiling?
-- What would an invoice line-item look like by model?
+```mermaid
+flowchart LR
+  subgraph ingest [Ingest]
+    CSV[CSV exports]
+    OR[OpenRouter Activity API]
+    OAI[OpenAI Org Costs API]
+  end
+  subgraph adapters [Adapters]
+    Imp[CSV importers]
+    SyncOR[sync_openrouter]
+    SyncOAI[sync_openai]
+  end
+  DB[(SQLite ledger\n~/.llm-ledger/ledger.db)]
+  MCP[MCP tools]
+  Agent[Cursor / Claude / MCP client]
 
-`llm-ledger` keeps that data on your machine (`~/.llm-ledger/ledger.db` by default).
+  CSV --> Imp --> DB
+  OR --> SyncOR --> DB
+  OAI --> SyncOAI --> DB
+  DB --> MCP --> Agent
+```
+
+See [docs/architecture.md](./docs/architecture.md) for failure modes, idempotency keys, and design decisions. Short ADR: [docs/adr/0001-local-sqlite-mcp.md](./docs/adr/0001-local-sqlite-mcp.md).
+
+## Why MCP
+
+Dashboards answer humans. Agents need tools: *sync OpenRouter*, *check budget for acme*, *invoice summary for September*. Keeping the ledger local means cost data stays on the machine that runs the MCP server.
+
+## Security model
+
+| Concern | Behavior |
+|---------|----------|
+| Ledger data | Local SQLite only (`LLM_LEDGER_DB` override). No cloud sync. No telemetry. |
+| API keys | Read from env (or optional tool arg) **at sync time only**. Never written to SQLite. Never echoed in tool results. |
+| OpenRouter | Requires a **Management / provisioning** key — inference keys get 401/403. |
+| OpenAI | Requires an **Organization Admin** key — project `sk-` keys will not work. |
+| Least privilege | Create keys scoped to management/admin APIs only; rotate if exposed. |
+
+Do not commit `.env`, keys, or `ledger.db`.
 
 ## Install
 
@@ -26,25 +59,32 @@ npm install
 npm run build
 ```
 
-Requires **Node.js 20+**. Native module `better-sqlite3` needs build tools on some platforms (Xcode CLT on macOS, `build-essential` + python on Linux).
+Requires **Node.js 20+**. Native module `better-sqlite3` needs build tools on some platforms (Xcode CLT on macOS, `build-essential` + Python on Linux).
 
 ## MCP tools
 
 | Tool | Purpose |
 |------|---------|
 | `import_csv` | Import a usage CSV (`openai` / `anthropic` / `openrouter`) |
-| `sync_openrouter` | Pull OpenRouter Activity API spend (Management key) into the ledger |
-| `sync_openai` | Pull OpenAI Organization Costs API spend (Admin key) into the ledger |
+| `sync_openrouter` | Pull OpenRouter Activity spend (Management key) |
+| `sync_openai` | Pull OpenAI Organization Costs (Admin key) |
 | `spend_this_month` | Total spend for current month (or `YYYY-MM`) |
 | `spend_by_project` | Spend breakdown by project |
 | `invoice_summary` | Lines by provider + model (+ project) |
 | `set_budget` | Set monthly USD budget for a project |
 | `check_budget` | Compare MTD spend vs budget |
-| `list_imports` | List CSV / OpenRouter / OpenAI sync import batches |
+| `list_imports` | List CSV / sync import batches |
+
+### Example agent prompts
+
+- *Sync OpenRouter for the last 30 days.*
+- *Import this OpenAI CSV tagged as project `acme`.*
+- *Set budget for acme to $150/month, then check budget.*
+- *Invoice summary for September by model.*
 
 ### CSV columns (resilient aliases)
 
-Importers tolerate common export header names. Cost is optional — when missing, a built-in pricing fallback map estimates USD from tokens.
+Importers tolerate common export header names. Cost is optional — when missing, a built-in pricing fallback map estimates USD from tokens (approximate public list rates; prefer CSVs that include USD).
 
 **OpenAI** — `date` / `usage_date` / `timestamp`, `model`, `input_tokens` / `prompt_tokens`, `output_tokens` / `completion_tokens`, optional `cost` / `cost_usd`, optional `project`.
 
@@ -55,47 +95,29 @@ Importers tolerate common export header names. Cost is optional — when missing
 ## Database
 
 - Default path: `~/.llm-ledger/ledger.db`
-- Override with env `LLM_LEDGER_DB=/path/to/ledger.db`
-
-No cloud sync of the ledger itself. No telemetry. API keys are read from the environment (or an optional tool arg) at sync time and are **not** written to SQLite.
+- Override: `LLM_LEDGER_DB=/path/to/ledger.db`
 
 ## OpenRouter Activity sync (`sync_openrouter`)
 
-OpenRouter's `/api/v1/activity` (and analytics) endpoints require a **Management API key** (also called a provisioning key). Ordinary inference / chat keys return **401/403**.
+OpenRouter’s `/api/v1/activity` (and analytics) endpoints require a **Management API key**. Ordinary inference / chat keys return **401/403**.
 
-1. Create a Management key at [openrouter.ai/settings](https://openrouter.ai/settings) → **Management Keys** ([direct link](https://openrouter.ai/settings/management-keys)).
-2. Set env `OPENROUTER_MANAGEMENT_KEY` in your MCP server config (preferred), **or** pass `api_key` to the tool once (never logged or echoed in tool results).
-3. Ask your MCP client, e.g. *"Sync OpenRouter last 30 days"* / call `sync_openrouter` with optional `since` / `until` (`YYYY-MM-DD`) or `project`.
+1. Create a Management key at [openrouter.ai/settings/management-keys](https://openrouter.ai/settings/management-keys).
+2. Set `OPENROUTER_MANAGEMENT_KEY` in MCP server `env` (preferred), or pass `api_key` once (never logged).
+3. Call with optional `since` / `until` (`YYYY-MM-DD`) or `project`.
 
-Example Cursor `env` block:
-
-```json
-{
-  "mcpServers": {
-    "llm-ledger": {
-      "command": "node",
-      "args": ["/absolute/path/to/llm-ledger/dist/index.js"],
-      "env": {
-        "LLM_LEDGER_DB": "/absolute/path/to/optional-custom.db",
-        "OPENROUTER_MANAGEMENT_KEY": "sk-or-…"
-      }
-    }
-  }
-}
-```
-
-Sync is **idempotent**: rows are keyed by day + model + endpoint (+ workspace when present), so re-running skips duplicates and records an import batch visible via `list_imports`. The Activity API covers roughly the last 30 completed UTC days.
-
+Sync is **idempotent**: rows keyed by day + model + endpoint (+ workspace when present). Re-runs skip duplicates and record an import batch via `list_imports`. Activity covers roughly the last 30 completed UTC days.
 
 ## OpenAI Costs sync (`sync_openai`)
 
-OpenAI's `/v1/organization/costs` endpoint requires an **Organization Admin API key**. Regular project `sk-` inference keys **will not work**.
+OpenAI’s `/v1/organization/costs` endpoint requires an **Organization Admin API key**. Regular project `sk-` keys **will not work**.
 
 1. Create an Admin key at [platform.openai.com/settings/organization/admin-keys](https://platform.openai.com/settings/organization/admin-keys).
-2. Set env `OPENAI_ADMIN_KEY` in your MCP server config (preferred), **or** pass `api_key` to the tool once (never logged or echoed in tool results).
-3. Ask your MCP client, e.g. *"Sync OpenAI last 30 days"* / call `sync_openai` with optional `since` / `until` (`YYYY-MM-DD`), `start_time` (unix), `limit` (1–180), or `project`.
+2. Set `OPENAI_ADMIN_KEY` in MCP `env` (preferred), or pass `api_key` once.
+3. Optional args: `since` / `until`, `start_time` (unix), `limit` (1–180), `project`.
 
-Example Cursor `env` block (combined with OpenRouter):
+Idempotency key shape: `oai:costs:{date}:{line_item|project|bucket}`. v0.3 is **costs-only** (token columns are 0).
+
+### Example Cursor MCP config
 
 ```json
 {
@@ -113,27 +135,7 @@ Example Cursor `env` block (combined with OpenRouter):
 }
 ```
 
-Sync is **idempotent**: rows are keyed as `oai:costs:{date}:{line_item|project|bucket}` (day + line item + project when present). v0.3 is **costs-only** (token columns are 0). Import batches appear in `list_imports`.
-
-## Cursor config
-
-Add to your MCP settings (e.g. Cursor **Settings → MCP**):
-
-```json
-{
-  "mcpServers": {
-    "llm-ledger": {
-      "command": "node",
-      "args": ["/absolute/path/to/llm-ledger/dist/index.js"],
-      "env": {
-        "LLM_LEDGER_DB": "/absolute/path/to/optional-custom.db"
-      }
-    }
-  }
-}
-```
-
-### npx (once on the public registry)
+### npx (once published)
 
 ```json
 {
@@ -146,37 +148,25 @@ Add to your MCP settings (e.g. Cursor **Settings → MCP**):
 }
 ```
 
-Or after a local build, point command at node with args to dist/index.js. See PUBLISH.md for registry release steps.
+See [PUBLISH.md](./PUBLISH.md) for registry release steps.
 
-## Claude Desktop config
+## Claude Desktop
 
-Edit `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "llm-ledger": {
-      "command": "node",
-      "args": ["/absolute/path/to/llm-ledger/dist/index.js"]
-    }
-  }
-}
-```
+Edit `claude_desktop_config.json` with the same `command` / `args` pattern as above.
 
 ## Scripts
 
 ```bash
-npm run build   # compile TypeScript → dist/
-npm test        # vitest (CSV parse + aggregation + sync mocks)
-npm start       # run MCP server on stdio
+npm run build   # TypeScript → dist/
+npm test        # vitest (CSV parse, aggregation, sync mocks)
+npm start       # MCP server on stdio
 ```
 
-## Example flow
+## Roadmap
 
-1. Export usage CSV from OpenAI / Anthropic / OpenRouter, **or** set the env var and call the sync tool for the last 30 days.
-2. Ask your MCP client: *Import this OpenAI CSV tagged as project `acme`.*
-3. *Set budget for acme to $150/month.*
-4. *Check budget for acme.* / *Invoice summary for September.*
+- npm package for one-line `npx` install
+- Additional provider cost adapters as APIs stabilize
+- Richer project tagging / multi-workspace reporting
 
 ## License
 
@@ -184,6 +174,4 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Attribution
 
-Built as an open-source TypeScript MCP server using [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk), [better-sqlite3](https://github.com/WiseLibs/better-sqlite3), and [csv-parse](https://github.com/adaltas/node-csv).
-
-Pricing fallbacks are approximate public list rates and may drift — prefer CSVs that include USD cost when accuracy matters.
+TypeScript MCP server using [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk), [better-sqlite3](https://github.com/WiseLibs/better-sqlite3), and [csv-parse](https://github.com/adaltas/node-csv).
